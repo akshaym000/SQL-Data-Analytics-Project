@@ -1,53 +1,78 @@
 /*
 ===============================================================================
-Performance Analysis (Year-over-Year, Month-over-Month)
+Product Performance: Annual Trend and Year-over-Year Change
 ===============================================================================
-Purpose:
-    - To measure the performance of products, customers, or regions over time.
-    - For benchmarking and identifying high-performing entities.
-    - To track yearly trends and growth.
+Business question:
+    After identifying which product categories contribute most to sales, which
+    products within those categories are gaining or losing sales compared with
+    the same product in the prior calendar year?
 
-SQL Functions Used:
-    - LAG(): Accesses data from previous rows.
-    - AVG() OVER(): Computes average values within partitions.
-    - CASE: Defines conditional logic for trend analysis.
+Interpretation:
+    This is a descriptive prioritization view. A sales increase or decrease is
+    a signal for follow-up, not evidence that a particular cause or action drove it.
+
+SQL techniques:
+    - CTEs for annual product-level aggregation.
+    - Window function AVG() OVER() for each product's observed-year baseline.
+    - Self-join to compare only with the immediately prior calendar year.
+    - CASE expressions for readable direction labels.
 ===============================================================================
 */
 
-/* Analyze the yearly performance of products by comparing their sales 
-to both the average sales performance of the product and the previous year's sales */
-Use DataWarehouseAnalytics;
+USE DataWarehouseAnalytics;
+GO
+
 WITH yearly_product_sales AS (
     SELECT
         YEAR(f.order_date) AS order_year,
+        p.product_key,
         p.product_name,
+        p.category,
         SUM(f.sales_amount) AS current_sales
-    FROM gold.fact_sales f
-    LEFT JOIN gold.dim_products p
+    FROM gold.fact_sales AS f
+    LEFT JOIN gold.dim_products AS p
         ON f.product_key = p.product_key
     WHERE f.order_date IS NOT NULL
-    GROUP BY 
+    GROUP BY
         YEAR(f.order_date),
-        p.product_name
+        p.product_key,
+        p.product_name,
+        p.category
 )
 SELECT
-    order_year,
-    product_name,
-    current_sales,
-    AVG(current_sales) OVER (PARTITION BY product_name) AS avg_sales,
-    current_sales - AVG(current_sales) OVER (PARTITION BY product_name) AS diff_avg,
-    CASE 
-        WHEN current_sales - AVG(current_sales) OVER (PARTITION BY product_name) > 0 THEN 'Above Avg'
-        WHEN current_sales - AVG(current_sales) OVER (PARTITION BY product_name) < 0 THEN 'Below Avg'
-        ELSE 'Avg'
-    END AS avg_change,
-    -- Year-over-Year Analysis
-    LAG(current_sales) OVER (PARTITION BY product_name ORDER BY order_year) AS py_sales,
-    current_sales - LAG(current_sales) OVER (PARTITION BY product_name ORDER BY order_year) AS diff_py,
-    CASE 
-        WHEN current_sales - LAG(current_sales) OVER (PARTITION BY product_name ORDER BY order_year) > 0 THEN 'Increase'
-        WHEN current_sales - LAG(current_sales) OVER (PARTITION BY product_name ORDER BY order_year) < 0 THEN 'Decrease'
-        ELSE 'No Change'
-    END AS py_change
-FROM yearly_product_sales
-ORDER BY product_name, order_year;
+    current_year.order_year,
+    current_year.category,
+    current_year.product_name,
+    current_year.current_sales,
+    AVG(current_year.current_sales) OVER (
+        PARTITION BY current_year.product_key
+    ) AS avg_annual_sales,
+    current_year.current_sales
+        - AVG(current_year.current_sales) OVER (
+            PARTITION BY current_year.product_key
+        ) AS difference_from_product_average,
+    prior_year.current_sales AS prior_year_sales,
+    current_year.current_sales - prior_year.current_sales AS change_from_prior_year,
+    CASE
+        WHEN prior_year.current_sales IS NULL THEN NULL
+        WHEN prior_year.current_sales = 0 THEN NULL
+        ELSE ROUND(
+            (current_year.current_sales - prior_year.current_sales) * 100.0
+                / prior_year.current_sales,
+            2
+        )
+    END AS prior_year_change_pct,
+    CASE
+        WHEN prior_year.current_sales IS NULL THEN 'No prior-year comparison'
+        WHEN current_year.current_sales > prior_year.current_sales THEN 'Increase'
+        WHEN current_year.current_sales < prior_year.current_sales THEN 'Decrease'
+        ELSE 'No change'
+    END AS prior_year_direction
+FROM yearly_product_sales AS current_year
+LEFT JOIN yearly_product_sales AS prior_year
+    ON prior_year.product_key = current_year.product_key
+    AND prior_year.order_year = current_year.order_year - 1
+ORDER BY
+    current_year.category,
+    current_year.product_name,
+    current_year.order_year;
